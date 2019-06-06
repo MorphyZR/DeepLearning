@@ -20,6 +20,25 @@ class Relu:
         dx = dout 
 
         return dx
+
+class Sigmoid:
+    '''
+        Out = 1 / (1 + exp(-x))
+    '''
+    def __init__(self):
+        self.out = None
+    
+    def forward(self, x: np.array) -> np,array:
+        out = 1 / (1 + np.exp(-x))
+        self.out = out
+        
+        return out
+
+    def backward(self, dout: np.array) -> np.array:
+        dx = dout * self.out * (1.0 - self.out)
+
+        return dx
+
         
 if __name__ == "__main__":
     x = np.array([[1, -2], [2, -3]])
