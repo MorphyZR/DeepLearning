@@ -1,2 +1,4 @@
 # ide settings
 .vscode/
+*.pyc
+*.gz
