@@ -1,5 +1,6 @@
 import numpy as np
 from .functions import *
+from .util import im2col, col2im
 
 # Basic Layer =================================
 class MulLayer:
@@ -56,10 +57,15 @@ class Affine:
         self.x = None
         self.dw = None
         self.db = None
+        self.original_x_shape = None
 
     def forward(self, x: np.array) -> np.array:
+        
+        self.original_x_shape = x.shape
+        x = x.reshape(x.shape[0], -1)
         self.x = x
-        out = np.dot(x, self.w) + self.b
+        # breakpoint()
+        out = np.dot(self.x, self.w) + self.b
 
         return out
 
@@ -68,6 +74,7 @@ class Affine:
         self.dw = np.dot(self.x.T, dout)
         self.db = np.sum(dout, axis=0)
 
+        dx = dx.reshape(*self.original_x_shape) 
         return dx
 
 # Activation ===============================================
@@ -225,6 +232,126 @@ class BatchNorm:
         # step-0
         dx = dx1 + dx2
         # breakpoint()
+        return dx
+
+class Dropout:
+    def __init__(self, dropout_ratio=0.5):
+        self.dropout_ratio = dropout_ratio
+        self.mask = None
+
+    def forward(self, x, train_flg=True):
+        if train_flg:
+            # random drop some input
+            self.mask = np.random.rand(*x.shape) > self.dropout_ratio
+            return x * self.mask
+        else:
+            # if it is not training, the input still need multiple the dropout ratio
+            return x * (1 - self.dropout_ratio)
+
+    def backward(self, dout):
+        # the dropped neral do not nned backward
+        return dout * self.mask
+
+class Convolution:
+    def __init__(self, filter, offset, stride=1, pad=0):
+        '''
+        @params:
+        - filter: the filter(kernel) of convolution layer, 4-D array(FN,C,FH,FW)
+        - offset: the offset of convolution layer,
+        '''
+        self.filter = filter
+        self.offset = offset
+        self.stride = stride
+        self.pad = pad
+
+        # needed by backward
+        self.x = None
+        self.col = None
+        self.flatten_filter = None
+
+        # backward result
+        self.dW = None
+        self.db = None
+
+    def forward(self, x):
+        '''
+        @params:
+        - x : the inpud data, 4-D array, (N : bactch size, C: channel num, H, W)
+        
+        @return:
+        
+        '''
+        FN, C, FH, FW = self.filter.shape
+        N, C, H, W = x.shape
+
+        out_h = (H + 2 * self.pad - FH) // self.stride + 1
+        out_w = (W + 2 * self.pad - FW) // self.stride + 1
+
+        col = im2col(x, FH, FW, self.stride, self.pad) # (N*out_H*out_W, C*FH*FW)
+        flatten_filter = self.filter.reshape(FN, -1).T # (C*FH*FW, FN)
+        out = np.dot(col, flatten_filter) + self.offset
+
+        # ??? 为什么不能直接reshape成（N, -1, out_h, out_w）
+        out = out.reshape(N, out_h, out_w, -1).transpose(0, 3, 1, 2)
+
+        self.x = x
+        self.col = col
+        self.flatten_filter = flatten_filter
+
+        return out
+
+    def backward(self, dout):
+        '''
+            dout.shape = (N, out_c, out_h, out_w)
+        '''
+        FN, C, FH, FW = self.filter.shape
+        dout = dout.transpose(0, 2, 3, 1).reshape(-1, FN)  # (-1, FN)
+
+        self.db = np.sum(dout, axis=0)
+        self.dW = np.dot(self.col.T, dout) # (C*FH*FW, N*out_H*out_W) * (-1, FN))
+        self.dW = self.dW.transpose(1, 0).reshape(FN, C, FH, FW)
+
+        dcol = np.dot(dout, self.flatten_filter.T)
+        dx = col2im(dcol, self.x.shape, FH, FW, self.stride, self.pad)
+
+        return dx
+
+class Pooling:
+    def __init__(self, pool_h, pool_w, stride=1, pad=0):
+        self.pool_h = pool_h
+        self.pool_w = pool_w
+        self.stride = stride
+        self.pad = pad
+
+        self.x = None
+        self.arg_max = None
+
+    def forward(self, x):
+        N, C, H, W = x.shape
+        out_h = (H - self.pool_h) // self.stride + 1
+        out_w = (W - self.pool_w) // self.stride + 1
+
+        col = im2col(x, self.pool_h, self.pool_w, self.stride, self.pad)
+        col = col.reshape(-1, self.pool_h * self.pool_w)
+
+        self.arg_max = np.argmax(col, axis=1)
+        out = np.max(col, axis=1)
+        out = out.reshape(N, out_h, out_w, C).transpose(0, 3, 1, 2)
+        self.x = x
+
+        return out
+        
+    def backward(self, dout):
+        dout = dout.transpose(0, 2, 3, 1)
+
+        pool_size = self.pool_h * self.pool_w
+        dmax = np.zeros((dout.size, pool_size))
+        dmax[np.arange(self.arg_max.size), self.arg_max.flatten()] = dout.flatten()
+        dmax = dmax.reshape(dout.shape + (pool_size, ))
+
+        dcol = dmax.reshape(dmax.shape[0] * dmax.shape[1] * dmax.shape[2], -1)
+        dx = col2im(dcol, self.x.shape, self.pool_h, self.pool_w, self.stride, self.pad)
+
         return dx
 
 if __name__ == "__main__":
